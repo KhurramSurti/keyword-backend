@@ -1,0 +1,6 @@
+{
+  "name": "surti-keyword-backend",
+  "version": "1.0.0",
+  "description": "Real keyword fetcher for Surti Listing Forge",
+  "type": "module"
+}
