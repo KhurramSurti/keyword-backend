@@ -12,6 +12,7 @@ export default async function handler(req, res) {
   }
 
   const query = (req.query.q || '').trim();
+  const market = (req.query.market || 'us').toLowerCase(); // 'us' or 'gb'
   if (!query) {
     return res.status(400).json({ error: 'Please provide a search term using ?q=your+product' });
   }
@@ -28,9 +29,9 @@ export default async function handler(req, res) {
   // Fetch everything in parallel
   const [google, amazon, walmart, ebayData] = await Promise.all([
     fetchMultiple(uniqVariants, fetchGoogle),
-    fetchMultiple(uniqVariants, fetchAmazon),
+    fetchMultiple(uniqVariants, function(q){ return fetchAmazon(q, market); }),
     fetchMultiple(uniqVariants, fetchWalmart),
-    fetchEbay(query),
+    fetchEbay(query, market),
   ]);
 
   return res.status(200).json({
@@ -77,10 +78,14 @@ async function fetchGoogle(q) {
   return [];
 }
 
-// ─── Amazon Autocomplete ──────────────────────────
-async function fetchAmazon(q) {
+// ─── Amazon Autocomplete (market-aware: US or UK) ──
+async function fetchAmazon(q, market) {
+  // UK uses amazon.co.uk with its own marketplace id; US uses amazon.com
+  const isUK = market === 'gb';
+  const domain = isUK ? 'completion.amazon.co.uk' : 'completion.amazon.com';
+  const mid = isUK ? 'A1F83G8C2ARO7P' : 'ATVPDKIKX0DER';
   try {
-    const url = 'https://completion.amazon.com/api/2017/suggestions?mid=ATVPDKIKX0DER&alias=aps&prefix=' + encodeURIComponent(q);
+    const url = 'https://' + domain + '/api/2017/suggestions?mid=' + mid + '&alias=aps&prefix=' + encodeURIComponent(q);
     const r = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
@@ -123,8 +128,9 @@ async function fetchWalmart(q) {
 // ─── eBay Browse API ──────────────────────────────
 // Gets a token using App ID + Cert ID, then searches real listings.
 // Extracts keywords from real titles + returns competitor data.
-async function fetchEbay(q) {
+async function fetchEbay(q, market) {
   const result = { keywords: [], competitors: [] };
+  const marketplaceId = (market === 'gb') ? 'EBAY_GB' : 'EBAY_US';
   try {
     const appId = process.env.EBAY_APP_ID;
     const certId = process.env.EBAY_CERT_ID;
@@ -156,7 +162,7 @@ async function fetchEbay(q) {
       {
         headers: {
           'Authorization': 'Bearer ' + token,
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
+          'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
         },
       }
     );
