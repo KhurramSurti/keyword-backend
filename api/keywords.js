@@ -12,7 +12,7 @@ export default async function handler(req, res) {
   }
 
   const query = (req.query.q || '').trim();
-  const market = (req.query.market || 'us').toLowerCase(); // 'us' or 'gb'
+  const market = (req.query.market || 'us').toLowerCase(); // 'us', 'gb' or 'au'
   if (!query) {
     return res.status(400).json({ error: 'Please provide a search term using ?q=your+product' });
   }
@@ -78,12 +78,17 @@ async function fetchGoogle(q) {
   return [];
 }
 
-// ─── Amazon Autocomplete (market-aware: US or UK) ──
+// ─── Amazon Autocomplete (market-aware: US, UK or AU) ──
 async function fetchAmazon(q, market) {
-  // UK uses amazon.co.uk with its own marketplace id; US uses amazon.com
-  const isUK = market === 'gb';
-  const domain = isUK ? 'completion.amazon.co.uk' : 'completion.amazon.com';
-  const mid = isUK ? 'A1F83G8C2ARO7P' : 'ATVPDKIKX0DER';
+  // Each market has its own Amazon domain + marketplace id
+  const AMZ = {
+    us: { domain: 'completion.amazon.com',    mid: 'ATVPDKIKX0DER'  },
+    gb: { domain: 'completion.amazon.co.uk',  mid: 'A1F83G8C2ARO7P' },
+    au: { domain: 'completion.amazon.com.au', mid: 'A39IBJ37TRP1C6' },
+  };
+  const cfg = AMZ[market] || AMZ.us;
+  const domain = cfg.domain;
+  const mid = cfg.mid;
   try {
     const url = 'https://' + domain + '/api/2017/suggestions?mid=' + mid + '&alias=aps&prefix=' + encodeURIComponent(q);
     const r = await fetch(url, {
@@ -130,7 +135,8 @@ async function fetchWalmart(q) {
 // Extracts keywords from real titles + returns competitor data.
 async function fetchEbay(q, market) {
   const result = { keywords: [], competitors: [] };
-  const marketplaceId = (market === 'gb') ? 'EBAY_GB' : 'EBAY_US';
+  const EBAY_MARKETS = { us: 'EBAY_US', gb: 'EBAY_GB', au: 'EBAY_AU' };
+  const marketplaceId = EBAY_MARKETS[market] || 'EBAY_US';
   try {
     const appId = process.env.EBAY_APP_ID;
     const certId = process.env.EBAY_CERT_ID;
