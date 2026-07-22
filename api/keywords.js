@@ -13,6 +13,7 @@ export default async function handler(req, res) {
 
   const query = (req.query.q || '').trim();
   const market = (req.query.market || 'us').toLowerCase(); // 'us', 'gb' or 'au'
+  const platform = (req.query.platform || '').toLowerCase(); // 'tiktok' adds TikTok keyword sources
   if (!query) {
     return res.status(400).json({ error: 'Please provide a search term using ?q=your+product' });
   }
@@ -27,11 +28,12 @@ export default async function handler(req, res) {
   const uniqVariants = [...new Set(variants)];
 
   // Fetch everything in parallel
-  const [google, amazon, walmart, ebayData] = await Promise.all([
+  const [google, amazon, walmart, ebayData, tiktok] = await Promise.all([
     fetchMultiple(uniqVariants, fetchGoogle),
     fetchMultiple(uniqVariants, function(q){ return fetchAmazon(q, market); }),
     fetchMultiple(uniqVariants, fetchWalmart),
     fetchEbay(query, market),
+    platform === 'tiktok' ? fetchTikTokKeywords(query) : Promise.resolve([]),
   ]);
 
   return res.status(200).json({
@@ -41,9 +43,42 @@ export default async function handler(req, res) {
     amazon: amazon,
     walmart: walmart,
     ebay: ebayData.keywords,
+    tiktok: tiktok,
     competitors: ebayData.competitors,
     fetchedAt: new Date().toISOString(),
   });
+}
+
+// ─── TikTok keywords: real TikTok suggest attempt + Google tiktok-flavored searches ──
+async function fetchTikTokKeywords(q) {
+  const out = [];
+  const seen = {};
+  function add(list){ (list||[]).forEach(k=>{ const key=String(k).toLowerCase().trim(); if(key && !seen[key]){ seen[key]=1; out.push(String(k).trim()); } }); }
+
+  // Attempt 1: TikTok web search suggest (unofficial — may be blocked; fail silently)
+  try {
+    const r = await fetch('https://www.tiktok.com/api/search/suggest/?keyword=' + encodeURIComponent(q) + '&aid=1988', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36', 'Referer': 'https://www.tiktok.com/' },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (r.ok) {
+      const data = await r.json();
+      const sug = (data && (data.sug_list || data.suggest_words || [])) || [];
+      add(sug.map(s => s.content || s.word || s.keyword || '').filter(Boolean));
+    }
+  } catch (e) { /* blocked — expected sometimes */ }
+
+  // Attempt 2 (reliable): Google autocomplete with tiktok-intent modifiers
+  try {
+    const mods = [q + ' tiktok', 'tiktok ' + q];
+    for (const m of mods) {
+      const r2 = await fetch('https://suggestqueries.google.com/complete/search?client=firefox&q=' + encodeURIComponent(m));
+      const d2 = await r2.json();
+      if (d2 && d2[1]) add(d2[1].map(s => s.replace(/\btiktok\b/gi,'').replace(/\s{2,}/g,' ').trim()).filter(x => x.length > 2));
+    }
+  } catch (e) { console.error('TikTok-flavored google error:', e.message); }
+
+  return out.slice(0, 10);
 }
 
 // Run a fetcher across multiple variants, merge unique results up to 10
