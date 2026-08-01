@@ -28,12 +28,13 @@ export default async function handler(req, res) {
   const uniqVariants = [...new Set(variants)];
 
   // Fetch everything in parallel
-  const [google, amazon, walmart, ebayData, tiktok] = await Promise.all([
+  const [google, amazon, walmart, ebayData, tiktok, aspects] = await Promise.all([
     fetchMultiple(uniqVariants, fetchGoogle),
     fetchMultiple(uniqVariants, function(q){ return fetchAmazon(q, market); }),
     fetchMultiple(uniqVariants, fetchWalmart),
     fetchEbay(query, market),
     platform === 'tiktok' ? fetchTikTokKeywords(query) : Promise.resolve([]),
+    fetchEbayAspects(query, market),
   ]);
 
   return res.status(200).json({
@@ -44,6 +45,7 @@ export default async function handler(req, res) {
     walmart: walmart,
     ebay: ebayData.keywords,
     tiktok: tiktok,
+    aspects: aspects,
     competitors: ebayData.competitors,
     fetchedAt: new Date().toISOString(),
   });
@@ -168,6 +170,66 @@ async function fetchWalmart(q) {
 // ─── eBay Browse API ──────────────────────────────
 // Gets a token using App ID + Cert ID, then searches real listings.
 // Extracts keywords from real titles + returns competitor data.
+// ─── eBay Taxonomy: real category + required/recommended Item Specifics ───
+async function fetchEbayAspects(q, market) {
+  const out = { category: null, categoryId: null, required: [], recommended: [] };
+  try {
+    const appId = process.env.EBAY_APP_ID;
+    const certId = process.env.EBAY_CERT_ID;
+    if (!appId || !certId) return out;
+
+    const credentials = Buffer.from(appId + ':' + certId).toString('base64');
+    const tokenRes = await fetch('https://api.ebay.com/identity/v1/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': 'Basic ' + credentials },
+      body: 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope',
+    });
+    const tokenData = await tokenRes.json();
+    const token = tokenData.access_token;
+    if (!token) return out;
+
+    // Category tree per marketplace: US=0, GB=3, AU=15
+    const TREES = { us: '0', gb: '3', au: '15' };
+    const treeId = TREES[market] || '0';
+
+    // Step 1: which category does this product belong to?
+    const sugRes = await fetch(
+      'https://api.ebay.com/commerce/taxonomy/v1/category_tree/' + treeId + '/get_category_suggestions?q=' + encodeURIComponent(q),
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    const sugData = await sugRes.json();
+    const first = sugData && sugData.categorySuggestions && sugData.categorySuggestions[0];
+    if (!first || !first.category) return out;
+
+    out.categoryId = first.category.categoryId;
+    out.category = (first.categoryTreeNodeAncestors || [])
+      .slice().reverse().map(a => a.categoryName)
+      .concat([first.category.categoryName]).join(' > ');
+
+    // Step 2: what Item Specifics does eBay want for that category?
+    const aspRes = await fetch(
+      'https://api.ebay.com/commerce/taxonomy/v1/category_tree/' + treeId + '/get_item_aspects_for_category?category_id=' + encodeURIComponent(out.categoryId),
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    const aspData = await aspRes.json();
+    (aspData.aspects || []).forEach(a => {
+      const c = a.aspectConstraint || {};
+      const name = a.localizedAspectName;
+      if (!name) return;
+      // sample allowed values help the AI pick valid entries
+      const vals = (a.aspectValues || []).slice(0, 8).map(v => v.localizedValue).filter(Boolean);
+      const entry = vals.length ? (name + ' (e.g. ' + vals.join(', ') + ')') : name;
+      if (c.aspectRequired) out.required.push(entry);
+      else if (c.aspectUsage === 'RECOMMENDED') out.recommended.push(entry);
+    });
+    out.required = out.required.slice(0, 15);
+    out.recommended = out.recommended.slice(0, 20);
+  } catch (e) {
+    console.error('Taxonomy error:', e.message);
+  }
+  return out;
+}
+
 async function fetchEbay(q, market) {
   const result = { keywords: [], competitors: [] };
   const EBAY_MARKETS = { us: 'EBAY_US', gb: 'EBAY_GB', au: 'EBAY_AU' };
