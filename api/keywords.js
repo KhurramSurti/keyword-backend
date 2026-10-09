@@ -37,6 +37,15 @@ export default async function handler(req, res) {
     fetchEbayAspects(query, market),
   ]);
 
+  // How many of the top competitor listings sit in each candidate category
+  if (aspects && aspects.categories && ebayData && ebayData.leafCats) {
+    const sampled = ebayData.leafCats.length;
+    aspects.categories.forEach(cd => {
+      cd.competitorsHere = ebayData.leafCats.filter(id => String(id) === String(cd.id)).length;
+      cd.competitorsSampled = sampled;
+    });
+  }
+
   return res.status(200).json({
     query: query,
     variantsTried: uniqVariants,
@@ -172,7 +181,7 @@ async function fetchWalmart(q) {
 // Extracts keywords from real titles + returns competitor data.
 // ─── eBay Taxonomy: real category + required/recommended Item Specifics ───
 async function fetchEbayAspects(q, market) {
-  const out = { category: null, categoryId: null, required: [], recommended: [] };
+  const out = { category: null, categoryId: null, required: [], recommended: [], categories: [] };
   try {
     const appId = process.env.EBAY_APP_ID;
     const certId = process.env.EBAY_CERT_ID;
@@ -200,6 +209,29 @@ async function fetchEbayAspects(q, market) {
     const sugData = await sugRes.json();
     const first = sugData && sugData.categorySuggestions && sugData.categorySuggestions[0];
     if (!first || !first.category) return out;
+
+    // Category candidates for Primary + Secondary: eBay's own top suggestions,
+    // each with a live count of active listings (proof the category is in use).
+    const MKT = { us: 'EBAY_US', gb: 'EBAY_GB', au: 'EBAY_AU' }[market] || 'EBAY_US';
+    // eBay does not allow a second category for these (help article id=4149)
+    const NO_SECOND = /(Cars & Trucks|Motorcycles >|Boats|Powersports|Other Vehicles|Trailers|Real Estate|DVDs & Blu-ray|GPS Units|iPods & MP3|Heavy Equipment|Concession Trailers|Printing Presses|Imaging & Aesthetics)/i;
+    const cands = (sugData.categorySuggestions || []).slice(0, 5).filter(s => s && s.category).map(s => ({
+      id: s.category.categoryId,
+      name: s.category.categoryName,
+      path: (s.categoryTreeNodeAncestors || []).slice().reverse().map(a => a.categoryName).concat([s.category.categoryName]).join(' > '),
+    }));
+    await Promise.all(cands.map(async cd => {
+      cd.noSecond = NO_SECOND.test(cd.path);
+      try {
+        const r = await fetch(
+          'https://api.ebay.com/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(q) + '&category_ids=' + encodeURIComponent(cd.id) + '&limit=1',
+          { headers: { 'Authorization': 'Bearer ' + token, 'X-EBAY-C-MARKETPLACE-ID': MKT }, signal: AbortSignal.timeout(6000) }
+        );
+        const j = await r.json();
+        cd.listings = typeof j.total === 'number' ? j.total : null;
+      } catch (e) { cd.listings = null; }
+    }));
+    out.categories = cands;
 
     out.categoryId = first.category.categoryId;
     out.category = (first.categoryTreeNodeAncestors || [])
@@ -273,6 +305,9 @@ async function fetchEbay(q, market) {
     const items = searchData.itemSummaries || [];
 
     // Extract competitor data (top 6 real listings)
+    // Which leaf categories do the top real listings use? (shows where competitors list)
+    result.leafCats = items.map(i => (i.leafCategoryIds || [])[0]).filter(Boolean);
+
     result.competitors = items.slice(0, 6).map(item => ({
       title: item.title || '',
       price: item.price ? (item.price.value + ' ' + item.price.currency) : 'N/A',
